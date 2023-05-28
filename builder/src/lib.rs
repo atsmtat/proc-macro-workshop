@@ -2,38 +2,68 @@ use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{
     parse::ParseStream, parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Error,
-    Field, Fields, GenericArgument, Ident, LitStr, PathArguments, Result, Token, Type,
+    Field, Fields, FieldsNamed, GenericArgument, Ident, LitStr, PathArguments, Result, Token, Type,
+    Visibility,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn my_builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let builder = Builder::new(input);
+    let builder = match Builder::new(input) {
+        Ok(b) => b,
+        Err(e) => return e.into_compile_error().into(),
+    };
 
     let builder_struct = builder.define_struct();
-    let builder_accessor = builder.define_builder_constructor();
     let builder_impl = builder.impl_struct();
+    let builder_accessor = builder.define_builder_constructor();
 
     let tokens = quote! {
         #builder_struct
-        #builder_accessor
         #builder_impl
+        #builder_accessor
     };
     proc_macro::TokenStream::from(tokens)
 }
 
 struct Builder {
-    /// input to Builder derive macro
-    input: DeriveInput,
+    /// name of the input struct
+    input_name: Ident,
+
+    /// visibility of the input struct
+    input_vis: Visibility,
+
+    /// named fields of the input struct
+    fields: FieldsNamed,
 
     /// name of the builder struct
-    name: Ident,
+    builder_name: Ident,
 }
 
 impl Builder {
-    fn new(input: DeriveInput) -> Self {
-        let name = Ident::new(&format!("{}Builder", &input.ident), Span::call_site());
-        Builder { input, name }
+    fn new(input: DeriveInput) -> Result<Self> {
+        let input_name = input.ident.clone();
+        let input_vis = input.vis.clone();
+        let builder_name = Ident::new(&format!("{}Builder", &input.ident), Span::call_site());
+        let fields = match input.data {
+            Data::Struct(data) => match data.fields {
+                Fields::Named(fields) => Ok(fields),
+                Fields::Unnamed(_) | Fields::Unit => Err(Error::new(
+                    data.fields.span(),
+                    "Struct with Builder macro must use named fields",
+                )),
+            },
+            Data::Enum(_) | Data::Union(_) => Err(Error::new(
+                Span::call_site(),
+                "Builder macro is allowed only on a struct type",
+            )),
+        };
+        Ok(Builder {
+            input_name,
+            input_vis,
+            builder_name,
+            fields: fields?,
+        })
     }
 
     /// Check if `ty` is a syntax tree representing a generic type with a
@@ -80,36 +110,22 @@ impl Builder {
     ///    current_dir: Option<String>,
     /// }
     fn define_struct(&self) -> TokenStream {
-        let vis = &self.input.vis;
-        let fields = match &self.input.data {
-            Data::Struct(ref data) => match &data.fields {
-                Fields::Named(ref fields) => {
-                    let new_fields = fields.named.iter().map(|f| {
-                        let fname = &f.ident;
-                        let fty = &f.ty;
-                        let build_fty = if Self::is_single_arg_generic_type(fty, "Option").is_some()
-                        {
-                            quote! { #fty }
-                        } else {
-                            quote! { std::option::Option< #fty > }
-                        };
-                        quote_spanned! { f.span()=> #fname : #build_fty }
-                    });
+        let vis = &self.input_vis;
+        let fields = self.fields.named.iter().map(|f| {
+            let fname = &f.ident;
+            let fty = &f.ty;
+            let build_fty = if Self::is_single_arg_generic_type(fty, "Option").is_some() {
+                quote! { #fty }
+            } else {
+                quote! { std::option::Option< #fty > }
+            };
+            quote_spanned! { f.span()=> #fname : #build_fty }
+        });
 
-                    quote! { #(#new_fields),* }
-                }
-                Fields::Unnamed(_) | Fields::Unit => {
-                    unimplemented!()
-                }
-            },
-
-            Data::Enum(_) => unimplemented!(),
-            Data::Union(_) => unimplemented!(),
-        };
-        let builder_name = &self.name;
+        let builder_name = &self.builder_name;
         quote! {
             #vis struct #builder_name {
-                #fields
+                #(#fields),*
             }
         }
     }
@@ -127,20 +143,17 @@ impl Builder {
     ///    }
     /// }
     fn define_builder_constructor(&self) -> TokenStream {
-        let input_name = &self.input.ident;
-        let fields_init = match &self.input.data {
-            Data::Struct(ref data) => {
-                let init = data.fields.iter().map(|f| {
-                    let name = &f.ident;
-                    quote_spanned! { f.span()=> #name : std::option::Option::None }
-                });
-                quote! {
-                    #(#init),*
-                }
+        let input_name = &self.input_name;
+        let fields_init = {
+            let init = self.fields.named.iter().map(|f| {
+                let name = &f.ident;
+                quote_spanned! { f.span()=> #name : std::option::Option::None }
+            });
+            quote! {
+                #(#init),*
             }
-            Data::Enum(_) | Data::Union(_) => unimplemented!(),
         };
-        let builder_name = &self.name;
+        let builder_name = &self.builder_name;
         quote! {
             impl #input_name {
                 pub fn builder() -> #builder_name {
@@ -156,7 +169,7 @@ impl Builder {
     fn impl_struct(&self) -> TokenStream {
         let field_setters = self.impl_field_setters();
         let build_method = self.impl_build();
-        let builder_name = &self.name;
+        let builder_name = &self.builder_name;
         quote! {
             impl #builder_name {
                 #field_setters
@@ -168,12 +181,10 @@ impl Builder {
     /// Check if the field has an inert attribute with "builder" path like below:
     /// #[builder(...)]
     fn has_builder_attr(field: &Field) -> Option<&Attribute> {
-        for attr in &field.attrs {
-            if attr.path().is_ident("builder") {
-                return Some(attr);
-            }
-        }
-        None
+        field
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("builder"))
     }
 
     /// Parse argument to `builder` attribute, expecting the following syntax:
@@ -197,26 +208,18 @@ impl Builder {
     ///    fn executable(&mut self, executable: String) -> &mut Self { ... }
     /// }
     fn impl_field_setters(&self) -> TokenStream {
-        match &self.input.data {
-            Data::Struct(ref data) => match &data.fields {
-                Fields::Named(ref fields) => {
-                    let methods = fields.named.iter().map(|f| {
-                        if let Some(attr) = Self::has_builder_attr(f) {
-                            match attr.parse_args_with(Self::parse_builder_attr_arg) {
-                                Ok(each_name) => Self::impl_each_builder(&each_name, f),
-                                Err(e) => e.into_compile_error(),
-                            }
-                        } else {
-                            Self::impl_field_builder(f)
-                        }
-                    });
-                    quote! {
-                        #(#methods)*
-                    }
+        let methods = self.fields.named.iter().map(|f| {
+            if let Some(attr) = Self::has_builder_attr(f) {
+                match attr.parse_args_with(Self::parse_builder_attr_arg) {
+                    Ok(each_name) => Self::impl_each_builder(&each_name, f),
+                    Err(e) => e.into_compile_error(),
                 }
-                Fields::Unnamed(_) | Fields::Unit => unimplemented!(),
-            },
-            Data::Enum(_) | Data::Union(_) => unimplemented!(),
+            } else {
+                Self::impl_field_builder(f)
+            }
+        });
+        quote! {
+            #(#methods)*
         }
     }
 
@@ -317,37 +320,31 @@ impl Builder {
     /// It returns an error if any non-optional (in the input) field is missing
     /// a value.
     fn impl_build(&self) -> TokenStream {
-        let field_inits = match &self.input.data {
-            Data::Struct(ref data) => match &data.fields {
-                Fields::Named(ref fields) => {
-                    let inits = fields.named.iter().map(|f| {
-                        let name = &f.ident;
-                        let name_str = format!("{}", name.as_ref().unwrap());
-                        if Self::is_single_arg_generic_type(&f.ty, "Option").is_some() {
-                            quote_spanned! {
-                                f.span() =>
-                                    #name : self.#name.take()
-                            }
-                        } else {
-                            let err = quote! {
-                                format!("field {} is missing", #name_str)
-                            };
-                            quote_spanned! {
-                                f.span()=>
-                                #name : self.#name.take().ok_or(#err)?
-                            }
-                        }
-                    });
-                    quote! {
-                        #(#inits),*
+        let field_inits = {
+            let inits = self.fields.named.iter().map(|f| {
+                let name = &f.ident;
+                let name_str = format!("{}", name.as_ref().unwrap());
+                if Self::is_single_arg_generic_type(&f.ty, "Option").is_some() {
+                    quote_spanned! {
+                        f.span() =>
+                            #name : self.#name.take()
+                    }
+                } else {
+                    let err = quote! {
+                        format!("field {} is missing", #name_str)
+                    };
+                    quote_spanned! {
+                        f.span()=>
+                            #name : self.#name.take().ok_or(#err)?
                     }
                 }
-                Fields::Unnamed(_) | Fields::Unit => unimplemented!(),
-            },
-            Data::Enum(_) | Data::Union(_) => unimplemented!(),
+            });
+            quote! {
+                #(#inits),*
+            }
         };
 
-        let input_name = &self.input.ident;
+        let input_name = &self.input_name;
         quote! {
             pub fn build(&mut self) ->
                 std::result::Result<#input_name, std::boxed::Box<dyn std::error::Error>> {

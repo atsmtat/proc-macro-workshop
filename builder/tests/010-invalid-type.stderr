@@ -1,0 +1,19 @@
+error: Struct with Builder macro must use named fields
+ --> tests/010-invalid-type.rs:7:14
+  |
+7 | pub struct Id(u32);
+  |              ^^^^^
+
+error: Struct with Builder macro must use named fields
+  --> tests/010-invalid-type.rs:10:16
+   |
+10 | pub struct Unit();
+   |                ^^
+
+error: Builder macro is allowed only on a struct type
+  --> tests/010-invalid-type.rs:12:10
+   |
+12 | #[derive(Builder)]
+   |          ^^^^^^^
+   |
+   = note: this error originates in the derive macro `Builder` (in Nightly builds, run with -Z macro-backtrace for more info)
