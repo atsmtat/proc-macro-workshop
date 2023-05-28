@@ -91,7 +91,7 @@ impl Builder {
                         {
                             quote! { #fty }
                         } else {
-                            quote! { Option< #fty > }
+                            quote! { std::option::Option< #fty > }
                         };
                         quote_spanned! { f.span()=> #fname : #build_fty }
                     });
@@ -132,7 +132,7 @@ impl Builder {
             Data::Struct(ref data) => {
                 let init = data.fields.iter().map(|f| {
                     let name = &f.ident;
-                    quote_spanned! { f.span()=> #name : None }
+                    quote_spanned! { f.span()=> #name : std::option::Option::None }
                 });
                 quote! {
                     #(#init),*
@@ -261,10 +261,10 @@ impl Builder {
         let each = quote_spanned! {
             field.span() =>
             fn #name(&mut self, #arg: #elem_ty) -> &mut Self {
-                if let Some(v) = self.#field_name.as_mut() {
+                if let std::option::Option::Some(v) = self.#field_name.as_mut() {
                     v.push(#arg);
                 } else {
-                    self.#field_name = Some(vec![#arg]);
+                    self.#field_name = std::option::Option::Some(vec![#arg]);
                 }
                 self
             }
@@ -300,7 +300,7 @@ impl Builder {
         quote_spanned! {
             field.span()=>
             fn #name(&mut self, #name: #build_fty) -> &mut Self {
-                self.#name = Some(#name);
+                self.#name = std::option::Option::Some(#name);
                 self
             }
         }
@@ -349,7 +349,8 @@ impl Builder {
 
         let input_name = &self.input.ident;
         quote! {
-            pub fn build(&mut self) -> Result<#input_name, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) ->
+                std::result::Result<#input_name, std::boxed::Box<dyn std::error::Error>> {
                 Ok(#input_name {
                     #field_inits
                 })
