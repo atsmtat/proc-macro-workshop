@@ -1,8 +1,8 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{
-    parse_macro_input, spanned::Spanned, Data, DeriveInput, Expr, ExprLit, Field, Fields,
-    GenericArgument, Ident, Lit, LitStr, PathArguments, Type,
+    parse::ParseStream, parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Error,
+    Field, Fields, GenericArgument, Ident, LitStr, PathArguments, Result, Token, Type,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -165,30 +165,29 @@ impl Builder {
         }
     }
 
-    /// check if the field has an inert attribute with "builder" path like below:
-    /// #[builder(each="XYZ")]
-    /// if so, return the builder function name "XYZ".
-    fn has_builder_attr(field: &Field) -> Option<LitStr> {
+    /// Check if the field has an inert attribute with "builder" path like below:
+    /// #[builder(...)]
+    fn has_builder_attr(field: &Field) -> Option<&Attribute> {
         for attr in &field.attrs {
             if attr.path().is_ident("builder") {
-                let each: Expr = attr.parse_args().unwrap();
-                if let Expr::Assign(assign) = each {
-                    if let (
-                        Expr::Path(lpath),
-                        Expr::Lit(ExprLit {
-                            attrs: _,
-                            lit: Lit::Str(n),
-                        }),
-                    ) = (*assign.left, *assign.right)
-                    {
-                        if lpath.path.is_ident("each") {
-                            return Some(n);
-                        }
-                    }
-                }
+                return Some(attr);
             }
         }
         None
+    }
+
+    /// Parse argument to `builder` attribute, expecting the following syntax:
+    /// #[builder(each="XYZ")]
+    ///           ^^^^^^^^^^  <- parse this input
+    /// Return the string literal "XYZ" if input is valid.
+    fn parse_builder_attr_arg(input: ParseStream) -> Result<LitStr> {
+        let each_token: Ident = input.parse()?;
+        if each_token != "each" {
+            return Err(Error::new(each_token.span(), "expected `each`"));
+        }
+        input.parse::<Token![=]>()?;
+        let s: LitStr = input.parse()?;
+        Ok(s)
     }
 
     /// Generate methods on the builder for setting a value of each of the
@@ -202,8 +201,11 @@ impl Builder {
             Data::Struct(ref data) => match &data.fields {
                 Fields::Named(ref fields) => {
                     let methods = fields.named.iter().map(|f| {
-                        if let Some(each_method) = Self::has_builder_attr(f) {
-                            Self::impl_each_builder(&each_method, f)
+                        if let Some(attr) = Self::has_builder_attr(f) {
+                            match attr.parse_args_with(Self::parse_builder_attr_arg) {
+                                Ok(each_name) => Self::impl_each_builder(&each_name, f),
+                                Err(e) => e.into_compile_error(),
+                            }
                         } else {
                             Self::impl_field_builder(f)
                         }

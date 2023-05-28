@@ -1,5 +1,11 @@
-error: expected `builder(each = "...")`
-  --> tests/08-unrecognized-attribute.rs:22:7
+error: expected `each`
+  --> tests/08-unrecognized-attribute.rs:22:15
    |
 22 |     #[builder(eac = "arg")]
-   |       ^^^^^^^^^^^^^^^^^^^^
+   |               ^^^
+
+error: expected `=`
+  --> tests/08-unrecognized-attribute.rs:24:19
+   |
+24 |     #[builder(each("arg"))]
+   |                   ^
